@@ -1,3 +1,4 @@
+#!/usr/bin/env ruby
 require 'fileutils'
 require 'set'
 require 'yaml'

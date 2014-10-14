@@ -2,7 +2,7 @@
 require 'fileutils'
 require 'set'
 require 'yaml'
-require 'digest/md5'
+require 'digest/sha1'
 
 
 def bytesToString(ai_Size)
@@ -19,9 +19,9 @@ def bytesToString(ai_Size)
 end
 
 
-def copyAndMd5(source, target)
+def copyAndSha1(source, target)
     sourceStat = File::stat(source)
-    digest = Digest::MD5.new()
+    digest = Digest::SHA1.new()
     File::open($targetTempPath, 'w') do |ft|
         size = File::size(source)
         begin
@@ -65,6 +65,7 @@ def iterateFiles(argDir, yieldFirst, &block)
     # iterate and yield, recurse if directory
     files.each do |path|
         next if File::symlink?(path)
+        next if File::pipe?(path)
         relativePath = path[$sourcePath.size + 1, path.size]
         skip = false
         $config['excludeList'].each do |x|
@@ -81,7 +82,7 @@ def iterateFiles(argDir, yieldFirst, &block)
 end
 
 
-COPY_SIZE = 64 * 1024 * 1024
+COPY_SIZE = 4 * 1024 * 1024
 
 $allConfig = YAML::load_file("bark.conf.yaml")
 
@@ -159,10 +160,10 @@ end
 $targetFilePath = File::join($targetPath, 'mirror')
 $targetArchivePath = File::join($targetPath, 'archive')
 
-$targetMd5Path = File::join($targetPath, 'md5.txt')
+$targetSha1Path = File::join($targetPath, 'sha1.txt')
 $targetTempPath = File::join($targetPath, 'temp.copying')
-$targetMd5UpdatePath = File::join($targetPath, 'md5-update.txt')
-$targetMd5MergedPath = File::join($targetPath, 'md5-merged.txt')
+$targetSha1UpdatePath = File::join($targetPath, 'sha1-update.txt')
+$targetSha1MergedPath = File::join($targetPath, 'sha1-merged.txt')
 
 $allSourceFiles = Set.new
 $allSourceDirs = Set.new
@@ -171,22 +172,22 @@ $filesCopiedCount = 0
 $filesCopiedSize = 0
 $filesArchivedCount = 0
 
-$targetMd5 = Hash.new
+$targetSha1 = Hash.new
 $targetSize = Hash.new
-$targetMd5Reverse = Hash.new
+$targetSha1Reverse = Hash.new
 
 FileUtils::mkdir($targetFilePath) unless File::directory?($targetFilePath)
 
-if File::exists?($targetMd5Path)
-    File::open($targetMd5Path, 'r') do |f|
+if File::exists?($targetSha1Path)
+    File::open($targetSha1Path, 'r') do |f|
         f.each_line do |line|
             next if line.strip.empty?
-            md5 = line[0, 32]
-            size = line[33, line.index(' ', 33) - 33].to_i
-            path = line.strip[line.index(' ', 33) + 1, line.size]
-            $targetMd5[path] = md5
-            $targetMd5Reverse[md5] ||= Array.new
-            $targetMd5Reverse[md5] << path
+            sha1 = line[0, 40]
+            size = line[41, line.index(' ', 41) - 41].to_i
+            path = line.strip[line.index(' ', 41) + 1, line.size]
+            $targetSha1[path] = sha1
+            $targetSha1Reverse[sha1] ||= Array.new
+            $targetSha1Reverse[sha1] << path
         end
     end
 end
@@ -210,16 +211,16 @@ iterateFiles($sourcePath, true) do |path|
                 (File::mtime(path) != File::mtime(destPath))
         if copyThis
             puts "Updating #{relativePath}"
-            md5 = copyAndMd5(path, destPath)
-            if md5
-                $targetMd5[relativePath] = md5
+            sha1 = copyAndSha1(path, destPath)
+            if sha1
+                $targetSha1[relativePath] = sha1
                 $targetSize[relativePath] = File::size(destPath)
-                $targetMd5Reverse[md5] ||= Array.new
-                $targetMd5Reverse[md5] << relativePath
+                $targetSha1Reverse[sha1] ||= Array.new
+                $targetSha1Reverse[sha1] << relativePath
                 $filesCopiedCount += 1
                 $filesCopiedSize += File::size(path)
-                File::open($targetMd5UpdatePath, 'a') do |f|
-                    f.puts "#{md5} #{File::size(destPath)} #{relativePath}"
+                File::open($targetSha1UpdatePath, 'a') do |f|
+                    f.puts "#{sha1} #{File::size(destPath)} #{relativePath}"
                     f.flush
                 end
             end
@@ -228,20 +229,20 @@ iterateFiles($sourcePath, true) do |path|
     end
 end
 
-# remove MD5 codes for all files that are no more in target
-md5PathsToBeRemoved = Array.new
-$targetMd5.each_key do |path|
+# remove SHA1 codes for all files that are no more in target
+sha1PathsToBeRemoved = Array.new
+$targetSha1.each_key do |path|
     unless File::exists?(File::join($targetFilePath, path))
-        md5PathsToBeRemoved << path
+        sha1PathsToBeRemoved << path
     end
 end
 
-md5PathsToBeRemoved.each do |path|
-    md5 = $targetMd5[path] 
-    $targetMd5.delete(path)
+sha1PathsToBeRemoved.each do |path|
+    sha1 = $targetSha1[path] 
+    $targetSha1.delete(path)
     $targetSize.delete(path)
-    $targetMd5Reverse[md5].delete(path)
-    $targetMd5Reverse.delete(md5) if $targetMd5Reverse[md5].empty?
+    $targetSha1Reverse[sha1].delete(path)
+    $targetSha1Reverse.delete(sha1) if $targetSha1Reverse[sha1].empty?
 end
 
 # see which files are in target, but no more in source
@@ -256,11 +257,11 @@ iterateFiles($targetFilePath, false) do |path|
     else
         relativePath = path[$targetFilePath.size + 1, path.size]
         unless $allSourceFiles.include?(relativePath)
-            # check whether the md5 can be found somewhere else in the target directory
+            # check whether the sha1 can be found somewhere else in the target directory
             copyExists = false
-            md5 = $targetMd5[relativePath]
-            if md5
-                otherFiles = $targetMd5Reverse[md5]
+            sha1 = $targetSha1[relativePath]
+            if sha1
+                otherFiles = $targetSha1Reverse[sha1]
                 if otherFiles
                     otherFiles.reject! { |x| x == relativePath }
                     unless otherFiles.empty?
@@ -286,43 +287,43 @@ iterateFiles($targetFilePath, false) do |path|
     end
 end
 
-# remove MD5 codes for all files that are no more in target
-md5PathsToBeRemoved = Array.new
-$targetMd5.each_key do |path|
+# remove SHA1 codes for all files that are no more in target
+sha1PathsToBeRemoved = Array.new
+$targetSha1.each_key do |path|
     unless File::exists?(File::join($targetFilePath, path))
-        md5PathsToBeRemoved << path
+        sha1PathsToBeRemoved << path
     end
 end
 
-md5PathsToBeRemoved.each do |path|
-    md5 = $targetMd5[path] 
-    $targetMd5.delete(path)
+sha1PathsToBeRemoved.each do |path|
+    sha1 = $targetSha1[path] 
+    $targetSha1.delete(path)
     $targetSize.delete(path)
-    if $targetMd5Reverse.include?(md5)
-        $targetMd5Reverse[md5].delete(path)
-        $targetMd5Reverse.delete(md5) if $targetMd5Reverse[md5].empty?
+    if $targetSha1Reverse.include?(sha1)
+        $targetSha1Reverse[sha1].delete(path)
+        $targetSha1Reverse.delete(sha1) if $targetSha1Reverse[sha1].empty?
     end
 end
 
-# now update the MD5 cache: add all md5-update entries backwards,
-# then add all previous md5 entries, every file once only
+# now update the SHA1 cache: add all sha1-update entries backwards,
+# then add all previous sha1 entries, every file once only
 
 $mergedFiles = Set.new
 $stdout.flush
 
-print 'Updating MD5 cache... '
+print 'Updating SHA1 cache... '
 $stdout.flush
-File::open($targetMd5MergedPath, 'w') do |fm|
-    if File::exists?($targetMd5UpdatePath)
-        File::open($targetMd5UpdatePath, 'r') do |fu|
+File::open($targetSha1MergedPath, 'w') do |fm|
+    if File::exists?($targetSha1UpdatePath)
+        File::open($targetSha1UpdatePath, 'r') do |fu|
             entries = fu.read.split("\n").reverse
             entries.each do |line|
                 next if line.strip.empty?
                 begin
-                    md5 = line[0, 32]
-                    size = line[33, line.index(' ', 33) - 33].to_i
-                    path = line.strip[line.index(' ', 33) + 1, line.size]
-                    if $targetMd5.include?(path) && (!$mergedFiles.include?(path))
+                    sha1 = line[0, 40]
+                    size = line[41, line.index(' ', 41) - 41].to_i
+                    path = line.strip[line.index(' ', 41) + 1, line.size]
+                    if $targetSha1.include?(path) && (!$mergedFiles.include?(path))
                         fm.puts line 
                         $mergedFiles << path
                     end
@@ -333,26 +334,26 @@ File::open($targetMd5MergedPath, 'w') do |fm|
                 end
             end
         end
-        FileUtils::rm_f($targetMd5UpdatePath)
+        FileUtils::rm_f($targetSha1UpdatePath)
     end
-    if File::exists?($targetMd5Path)
-        File::open($targetMd5Path, 'r') do |f|
+    if File::exists?($targetSha1Path)
+        File::open($targetSha1Path, 'r') do |f|
             entries = f.read.split("\n")
             entries.each do |line|
                 next if line.strip.empty?
-                md5 = line[0, 32]
-                size = line[33, line.index(' ', 33) - 33].to_i
-                path = line.strip[line.index(' ', 33) + 1, line.size]
-                if $targetMd5.include?(path) && (!$mergedFiles.include?(path))
+                sha1 = line[0, 40]
+                size = line[41, line.index(' ', 41) - 41].to_i
+                path = line.strip[line.index(' ', 41) + 1, line.size]
+                if $targetSha1.include?(path) && (!$mergedFiles.include?(path))
                     fm.puts line 
                     $mergedFiles << path
                 end
             end
         end
-        FileUtils::rm_f($targetMd5Path)
+        FileUtils::rm_f($targetSha1Path)
     end
 end
-FileUtils::mv($targetMd5MergedPath, $targetMd5Path)
+FileUtils::mv($targetSha1MergedPath, $targetSha1Path)
 puts 'done.'
 
 
